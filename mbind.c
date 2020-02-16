@@ -83,11 +83,17 @@ static int                  running;
 void spawn(char **argv)
 {
     if (fork() == 0) {
-        if (xcb)
-            close(xcb_get_file_descriptor(xcb));
-        setsid();
-        execvp(argv[0], argv);
-        exit(EXIT_SUCCESS);
+        int pid = fork();
+        if (pid == 0) {
+            if (xcb)
+                close(xcb_get_file_descriptor(xcb));
+            setsid();
+            execvp(argv[0], argv);
+            exit(EXIT_SUCCESS);
+        }
+        if (pid > 0)
+            exit(EXIT_SUCCESS);
+
     }
 }
 
@@ -188,44 +194,44 @@ int main(int argc, char **argv)
     signal(SIGTERM, trap);
 
     /* enter the main loop */
-    running = 1;
-    while (running) {
-        xcb_generic_event_t *event;
-        while ((event = xcb_wait_for_event(xcb))) {
-            if (! running)
-                break;
+    fd_set fds;
+    int fd = xcb_get_file_descriptor(xcb);
+    while (1) {
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
 
-            if (event->response_type == 0) {
-                xcb_generic_error_t *e = (xcb_generic_error_t *)event;
-                fprintf(stderr, "X11 Error, sequence 0x%x, resource %d, code = %d\n",
-                        e->sequence,
-                        e->resource_id,
-                        e->error_code);
-                free(event);
-                running = 0;
-                break;
-            }
+        if (xcb_connection_has_error(xcb))
+            break;
 
-            switch (event->response_type & ~0x80) {
-                case XCB_KEY_PRESS:
-                {
-                    xcb_key_press_event_t *e = (xcb_key_press_event_t *)event;
-                    xkb_keycode_t keycode = e->detail;
-                    xkb_keysym_t keysym = xkb_state_key_get_one_sym(xkb_state, keycode);
-                    int bindex = 0;
-                    while (bindings[bindex].args[0] != NULL) {
-                        if (bindings[bindex].sequence.modifier == e->state &&
-                                bindings[bindex].sequence.keysym == keysym)
-                            spawn((char**)bindings[bindex].args);
-                        bindex++;
-                    }
+        if (select(fd + 1, &fds, 0, 0, NULL)) {
+
+            xcb_generic_event_t *event;
+             while ((event = xcb_poll_for_event(xcb))) {
+                if (event->response_type == 0) {
+                    free(event);
                     break;
                 }
-                default:
-                    break;
-            }
 
-           free(event);
+                switch (event->response_type & ~0x80) {
+                    case XCB_KEY_PRESS:
+                    {
+                        xcb_key_press_event_t *e = (xcb_key_press_event_t *)event;
+                        xkb_keycode_t keycode = e->detail;
+                        xkb_keysym_t keysym = xkb_state_key_get_one_sym(xkb_state, keycode);
+                        int bindex = 0;
+                        while (bindings[bindex].args[0] != NULL) {
+                            if (bindings[bindex].sequence.modifier == e->state &&
+                                    bindings[bindex].sequence.keysym == keysym)
+                                spawn((char**)bindings[bindex].args);
+                            bindex++;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                free(event);
+             }
         }
     }
 
